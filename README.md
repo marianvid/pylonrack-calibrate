@@ -1,32 +1,9 @@
-## ParallaxVox workflow
+# pylonrack-calibrate
 
-This slot is built for one explicit purpose: calibrating the local
-`llama-server` setup used by [ParallaxVox](https://parallaxvox.com), a
-geopolitical news monitoring and analysis pipeline.
+PylonRack slot for **automated calibration** of `llama-server` parameters. Given a list of local GGUF models, runs a parameter sweep to find the best `llama-server` configuration for each model, in two distinct profiles:
 
-The pipeline has four model-heavy stages, each with its own workload shape:
-
-| Stage | Workload | Profile to calibrate | Models tested |
-|---|---|---|---|
-| RSS → Ideas | Many short prompts in batch | throughput | Llama 3.1 8B (+ draft) |
-| Ideas → Consolidation | A few parallel groups | throughput (par=2-4) | Gemma 4 26B-A4B |
-| Consolidation → Articles | Long generation, may be parallel | throughput | Qwen 3.6 35B-A3B |
-| Ad-hoc analysis | Single chat-style query | single | Any of the above |
-
-For each stage:
-
-1. Run a Standard suite with the relevant model and matching profile
-2. Read the winner's `Copy command` and apply those flags wherever the
-   stage spawns `llama-server` (or update the pylonrack-llama settings_map
-   if you run it interactively)
-3. Validate by running a real pipeline pass and comparing observed tok/s
-   against the calibrated number
-
-Results are not auto-applied — the human is the bridge between calibration
-and production. This is intentional: different stages use different settings
-and there's no role-aware mapping in the slot's data model.
-
----
+- **Single-use** (chat): optimizes decode tok/s and TTFT (time-to-first-token)
+- **Throughput** (parallel pipeline): optimizes aggregate tok/s across N parallel slots
 
 Persists results as a history of *suites* and surfaces a **winner** per (model, profile) — with a copy-pastable `llama-server` command.
 
@@ -46,38 +23,50 @@ Persists results as a history of *suites* and surfaces a **winner** per (model, 
    - Aggregates samples via median
 5. After all runs, winners are picked: max decode tok/s for single, max aggregate tok/s for throughput
 
-See **ParallaxVox workflow** below for the specific use case this slot was
-built to support.
-
 ---
 
-## ParallaxVox workflow
+## Interpreting results
 
-This slot is built for one explicit purpose: calibrating the local
-`llama-server` setup used by [ParallaxVox](https://parallaxvox.com), a
-geopolitical news monitoring and analysis pipeline.
+Results are persisted to `~/.pylonrack/calibrate_results.json`. Each suite contains a list of runs plus a `winners` map keyed by `(model_path, profile)`. The UI surfaces winners as cards at the bottom of the Live Run tab with a **Copy command** button.
 
-The pipeline has four model-heavy stages, each with its own workload shape:
+### Metrics by profile
 
-| Stage | Workload | Profile to calibrate | Models tested |
-|---|---|---|---|
-| RSS → Ideas | Many short prompts in batch | throughput | Llama 3.1 8B (+ draft) |
-| Ideas → Consolidation | A few parallel groups | throughput (par=2-4) | Gemma 4 26B-A4B |
-| Consolidation → Articles | Long generation, may be parallel | throughput | Qwen 3.6 35B-A3B |
-| Ad-hoc analysis | Single chat-style query | single | Any of the above |
+**Single profile** (one request at a time):
 
-For each stage:
+| Metric | Meaning | Better |
+|---|---|---|
+| `decode_tok_s` | Tokens per second during generation | Higher |
+| `prefill_tok_s` | Tokens per second while ingesting the prompt | Higher |
+| `ttft_ms` | Time to first token (ms) | Lower |
 
-1. Run a Standard suite with the relevant model and matching profile
-2. Read the winner's `Copy command` and apply those flags wherever the
-   stage spawns `llama-server` (or update the pylonrack-llama settings_map
-   if you run it interactively)
-3. Validate by running a real pipeline pass and comparing observed tok/s
-   against the calibrated number
+**Throughput profile** (N requests in parallel):
 
-Results are not auto-applied — the human is the bridge between calibration
-and production. This is intentional: different stages use different settings
-and there's no role-aware mapping in the slot's data model.
+| Metric | Meaning | Better |
+|---|---|---|
+| `aggregate_tok_s` | Total tokens generated / wall seconds | Higher |
+| `per_request_decode` | Mean decode tok/s per individual request | Higher |
+| `median_ttft_ms` | Median TTFT across the parallel requests | Lower |
+
+### Choosing a profile to consult
+
+The two profiles produce DIFFERENT winning parameters for the same model.
+Which one to read depends on how the model will be invoked:
+
+- Requests issued **one at a time** → read the single-profile winner
+- Requests issued **in parallel batches** → read the throughput winner
+
+For a use case that does both, run with both profiles enabled — the suite
+produces two winners per model, one per profile.
+
+### Speculative decoding
+
+A run label ending in `draft=on` indicates speculative decoding was active.
+The winning command will contain `-md <draft_path> --gpu-layers-draft 99`.
+Whether speculative actually helps depends on draft acceptance ratio (visible
+in server logs as `n_drafted` vs `n_accepted`) and tokenizer compatibility
+between main and draft. The UI lists draft candidates by size but does NOT
+verify tokenizer compatibility — mismatches surface at runtime as llama-server
+errors. Always validate speculative vs non-speculative on the same hardware.
 
 ---
 
@@ -179,7 +168,7 @@ Each suite uses three fixed prompts of different lengths to characterize prefill
 
 - **SHORT** (~32 tokens) — chat scale, used for throughput profile
 - **MEDIUM** (~440 tokens) — single-article scale, used for single profile
-- **LONG** (~3660 tokens) — long-context / consolidation scale
+- **LONG** (~3660 tokens) — long-context scale, reserved for future use
 
 Content is intentionally generic — calibration measures the engine, not the response quality. Only the token count and structure matter.
 

@@ -25,17 +25,18 @@ deps: websockets>=12.0, aiohttp>=3.9, psutil>=5.9, requests>=2.31
 
 ## PURPOSE
 
-Automated calibration of `llama-server` parameters for **ParallaxVox pipeline use**.
-Not a general-purpose benchmark — designed to find optimal flags for the specific
-workload patterns of ParallaxVox (geopolitical news monitoring + analysis):
+Automated calibration of `llama-server` parameters for local GGUF models.
+Given a set of selected models, the slot runs a parameter sweep per model
+and records performance metrics under two workload profiles:
 
-- **Single profile**: ad-hoc analysis, manual queries, chat-style single requests
-- **Throughput profile**: pipeline runs (RSS ingestion → ideas extraction → consolidation → article generation)
+- **single**: chat / single-request workload. Optimizes decode tok/s and TTFT.
+- **throughput**: parallel pipeline workload. Optimizes aggregate tok/s
+  across N concurrent slots.
 
-The authoritative output is a **winner** per (model, profile) tuple: optimal
-`llama-server` command line that the user copy-pastes into their pipeline
-configuration. ParallaxVox itself does NOT read calibrate's results — the
-human is the bridge.
+After each suite completes, the slot selects a winner per (model, profile)
+tuple and surfaces a copy-pastable `llama-server` command for the winning
+parameters. The user decides how and where to apply the result; the slot
+does not write to any external configuration.
 
 ---
 
@@ -143,18 +144,18 @@ Winners chosen via:
 
 ### Auto sweep strategy
 
-Not a full grid search. We hand-picked combinations that cover the practical
+Not a full grid search. Combinations are hand-picked to cover the practical
 decision space without combinatorial explosion:
 
 **Single budget=standard**: ub=512, ub=1024, ub=2048, ub=2048 at ctx=32768.
-This answers: "what ubatch size and what ctx fits my use case best?"
+This answers: "what ubatch size and what ctx fits this workload best?"
 
 **Throughput budget=standard**: parallel=2/4/8/16, plus best parallel at
 larger batch_size. This answers: "how many concurrent slots before
 throughput plateaus?"
 
-For PVx pipeline, standard budget is the recommended default. Quick is for
-smoke-testing a new model. Thorough only when publishing comparison data.
+Standard budget is the recommended default. Quick is for smoke-testing a
+new model. Thorough only when publishing comparison data.
 
 ### Speculative decoding (draft model) — single profile only
 
@@ -169,16 +170,17 @@ This is hardcoded in `llama_runner._build_cmd`.
 ### Resource check (pre-flight)
 
 `vm_stat` provides per-page counters. Available = `free + inactive + purgeable
-+ speculative`. Wired and active are not available for our purposes.
++ speculative`. Wired and active are not counted as available.
 
 Per-model size estimate: `weights + 6% KV-cache + 2 GB safety`. The 6%
 figure is heuristic for ctx=32768 at K-quant 4-bit. Real KV size scales
 with ctx, but the suite ALWAYS allocates with ctx=32768 to ensure the
 worst-case throughput run fits.
 
-We also detect active pylonrack-llama slots via lsof+ps and warn the user.
-A running llama instance means the calibrate-spawned one will compete for
-GPU; the user can either accept the noise or stop the other slot first.
+The slot also detects active pylonrack-llama instances via lsof+ps and
+warns the user. A running llama instance means the calibrate-spawned one
+will compete for GPU; the user can either accept the noise or stop the
+other slot first.
 
 ---
 
@@ -242,52 +244,110 @@ builder sees the post-suite state. See HISTORY for the bug.
 
 ---
 
-## PARALLAXVOX_INTEGRATION
+## RESULTS_INTERPRETATION
 
-The slot is NOT auto-wired into ParallaxVox. Outputs are JSON in
-`~/.pylonrack/calibrate_results.json`; the human reads winners and decides
-which settings to copy.
+The slot persists every suite to `~/.pylonrack/calibrate_results.json`. The
+following describes how to read the data and what each metric means.
 
-### Pipeline-stage to calibrate-profile mapping
+### Per-run record schema (subset)
 
-| Pipeline stage             | Workload pattern               | Profile     | Winner relevance               |
-|----------------------------|--------------------------------|-------------|--------------------------------|
-| RSS → Ideas extraction     | Batch, many short prompts      | throughput  | aggregate_tok_s primary        |
-| Ideas → Consolidation      | A few parallel groups          | throughput  | aggregate_tok_s, par=2-4       |
-| Consolidation → Articles   | Long generation, may parallel  | throughput  | per_request_decode + aggregate |
-| Ad-hoc analysis            | Single chat-style query        | single      | decode_tok_s + TTFT            |
+```json
+{
+  "model":       "/absolute/path/to/model.gguf",
+  "profile":     "single" | "throughput",
+  "label":       "ctx=8192, ub=2048"  | "par=8, b=2048, ub=512",
+  "params":      { /* full param dict passed to llama-server */ },
+  "prompt_name": "short" | "medium" | "long",
+  "samples":     [ /* per-sample timings */ ],
+  "aggregate":   { /* see below */ },
+  "status":      "ok" | "failed",
+  "error":       null | "..."
+}
+```
 
-For each ParallaxVox model role (ideas/consolidation/articles), the user
-should:
-1. Run calibrate suite with that model + throughput profile + standard budget
-2. Inspect the throughput winner's parameters
-3. Update ParallaxVox config (or the pylonrack-llama slot if used live) with
-   the winning `ctx_size`, `parallel`, `batch_size`, `ubatch_size`,
-   `flash_attn`, `cont_batching` values
-4. Validate by running a real pipeline pass and comparing observed tok/s
-   against the calibrated number
+### Aggregate fields
 
-### Models in scope (as of 2026-05-30)
+**Single profile** (`aggregate` is median across runs_per_combo samples):
 
-- `Llama 3.1 8B Instruct` (Q4_K_M, ~4.6 GB) — ideas extraction
-- `Gemma 4 26B-A4B-it` (Q4_K_M, ~17 GB) — consolidation
-- `Qwen 3.6 35B-A3B` (Q4_K_M, ~21 GB) — articles
-- `Qwen 3.5 4B` (Q4_K_M, ~2.8 GB) — small/screening tasks
-- `Llama 3.2 1B Instruct` (Q4_K_M, ~0.8 GB) — draft model for Llama 8B speculative
+| Field | Meaning | Higher is better? |
+|---|---|---|
+| `decode_tok_s` | Tokens per second during generation (after prefill) | Yes |
+| `prefill_tok_s` | Tokens per second while ingesting the prompt | Yes |
+| `ttft_ms` | Time-to-first-token in milliseconds | No (lower) |
+| `total_tok_s` | End-to-end tok/s including prefill | Yes |
 
-Draft model is currently set up only for Llama 3.1 8B → Llama 3.2 1B. Qwen
-draft pairing has been tested and does NOT work (tokenizer mismatch between
-Qwen 3.6 35B and Qwen 3.5 4B). Don't waste a suite on it.
+**Throughput profile** (parallel requests, aggregate computed from wall time):
 
-Cloud APIs (Claude, GPT) are used for the highest-quality articles where
-local inference is not good enough. Those don't go through calibrate.
+| Field | Meaning | Higher is better? |
+|---|---|---|
+| `aggregate_tok_s` | Sum of all parallel samples' tokens / wall seconds | Yes |
+| `per_request_decode` | Mean decode tok/s per individual request | Yes |
+| `median_ttft_ms` | Median TTFT across parallel requests | No (lower) |
+| `n_parallel` | Echo of the parallel param used | — |
 
-### Hardware envelope
+### How winners are picked
 
-Apple M3 Max, 128 GB unified memory, 16 CPU cores (12P+4E), 40 GPU cores.
-Servoy VM runs concurrently using ~50 GB. Effective ParallaxVox envelope:
-~70 GB. Calibrate enforces `min_memory_gb: 6` and refuses a suite if any
-selected model would push over the limit.
+```
+single:     argmax(decode_tok_s)  tiebreak: argmin(ttft_ms)
+throughput: argmax(aggregate_tok_s)
+```
+
+Winners are stored in `suite.winners[<model_path>][<profile>]` and contain
+the winning `params` dict plus a pre-built `command` string for direct
+copy/paste.
+
+### Reading the data programmatically
+
+```python
+import json, os
+with open(os.path.expanduser('~/.pylonrack/calibrate_results.json')) as f:
+    data = json.load(f)
+
+latest = data['suites'][-1]
+for model_path, profiles in latest.get('winners', {}).items():
+    for profile, winner in profiles.items():
+        print(f"{os.path.basename(model_path)} / {profile}")
+        print(f"  label:   {winner['label']}")
+        print(f"  metric:  {winner['aggregate']}")
+        print(f"  command: {winner['command']}")
+```
+
+### Choosing between profiles for a given workload
+
+This is a user decision and depends on how the model will be invoked at
+runtime. Two questions answer it:
+
+1. **Are requests issued one at a time, or in parallel batches?**
+   - One at a time → single profile is the right benchmark
+   - Many in parallel → throughput
+
+2. **What does "better" mean for the use case?**
+   - Lower latency on each request → single (look at decode_tok_s + ttft_ms)
+   - Higher total work per unit time → throughput (look at aggregate_tok_s)
+
+The two profiles produce DIFFERENT winning parameters. A model that wins
+single with `parallel=1, ubatch=2048` may win throughput with
+`parallel=8, batch=2048, ubatch=512`. They are not interchangeable.
+
+### Speculative decoding caveats
+
+When `draft=on` appears in a single-profile run label, the winning `command`
+includes `-md <draft_path> --gpu-layers-draft 99`. Whether speculative gives
+a real speedup depends on:
+
+- **Acceptance ratio**: ratio of `draft_n_accepted` to `draft_n`. Below ~50%,
+  the overhead of running the draft model can exceed the savings from
+  batched verification.
+- **Tokenizer compatibility**: draft and main MUST share a tokenizer. Models
+  from the same family at different sizes (e.g. Llama 3.1 8B + Llama 3.2 1B)
+  typically do. Cross-family pairings (e.g. Qwen draft for a Llama main, or
+  even Qwen 3.5 4B drafting Qwen 3.6 35B) often fail at runtime with vocab
+  errors. The UI does NOT validate this — it surfaces all candidates under
+  50% main size and lets llama-server reject mismatches loudly.
+- **Hardware shape**: speculative helps most on memory-bandwidth-bound
+  hardware. On Apple Silicon with unified memory, the gains are smaller
+  than typical CUDA results suggest. Always compare a draft-on run against
+  a draft-off baseline on the same hardware before trusting the speedup.
 
 ---
 
@@ -353,11 +413,11 @@ OOM-killed before becoming ready. Free memory and retry.
 
 ## DESIGN_DECISIONS
 
-### Why no benchmarking with realistic prompts from ParallaxVox
+### Why no benchmarking with realistic prompts
 
 Tempting but rejected. Two reasons:
-1. Reproducibility — content varies day-to-day; calibrate would never
-   produce comparable numbers across runs
+1. Reproducibility — prompt content varies day-to-day; calibrate would
+   never produce comparable numbers across runs
 2. Separation of concerns — engine performance and content quality are
    orthogonal; mixing them obscures both
 
@@ -366,24 +426,25 @@ performance envelope. Real-world variance comes from prompt content shape
 (reasoning patterns, vocabulary distribution) but calibrate measures the
 floor, not the typical case.
 
-### Why no auto-config-write to pylonrack-llama settings.json
+### Why no auto-config-write to other slots
 
-Two reasons:
+The slot's job is to measure and report; it does not write to any external
+configuration. Reasons:
 1. The user runs calibrate occasionally, but reads winners many times
    afterward (referring back). Auto-applying would lose that decoupling.
-2. Different model roles use different settings — the user picks per
-   ParallaxVox stage. Auto-apply would require role-aware mapping that
-   doesn't exist in either slot's data model.
+2. The slot has no knowledge of how the user intends to use the winning
+   command — different consumers (other slots, external scripts, manual
+   inspection) have different needs.
 
-User copies the winning command. Friction is intentional.
+The winner's `command` field is provided as a ready-to-paste string. The
+user decides where it goes.
 
-### Why manual matrix mode exists (and will be removed)
+### Why manual matrix mode exists (and may be removed)
 
-Original plan: power-users could specify arbitrary axis × value grids. For
-ParallaxVox use it's overkill — the auto sweep covers the same decision
-space with curated combinations. The UI currently shows it as "coming
-soon". Decision pending — flagged for removal when ParallaxVox calibration
-workflow is fully validated. (Owner: Marian)
+Original plan: power-users could specify arbitrary axis × value grids. In
+practice the auto sweep covers the same decision space with curated
+combinations, so the manual mode is unused. The UI currently shows it as
+"coming soon". Flagged for removal pending owner confirmation.
 
 ---
 
@@ -396,7 +457,7 @@ workflow is fully validated. (Owner: Marian)
            - SuiteRunner with notify callback for progress/winners/log
            - ResultsStore schema v2 (incremental persist, abort-safe)
            - vm_stat-based resource check + pylonrack-llama detection
-           - WebView UI (Setup / Live / History tabs) with green parallaxvox theme
+           - WebView UI (Setup / Live Run / History tabs)
            - WebSocket + aiohttp HTTP servers on adjacent ports
 2026-05-30 Bug fixes during initial integration:
            - model_scanner: filter Q4_0_X_X obsolete formats, dedup symlinks
@@ -456,10 +517,3 @@ When adding features, anchor them here:
 3. Add column to runs table in `app.js` renderRunRow()
 4. Update `_build_command_string` in suite_runner.py if it should flow to
    the copy-pastable command
-
-### Hooking a new model role into ParallaxVox
-
-User-side workflow, not slot-side. Run a calibrate suite with that model in
-the profile that matches the workload, copy the winner's command, and apply
-the flags wherever ParallaxVox spawns llama-server (or update the
-pylonrack-llama settings_map if running live).
