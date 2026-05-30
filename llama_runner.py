@@ -181,6 +181,12 @@ class LlamaRunner:
         draft = params.get("draft_model")
         if draft:
             cmd += ["-md", str(draft)]
+            # CRITICAL: offload draft model to GPU as well. Without this,
+            # the draft runs on CPU which is catastrophically slow on Apple
+            # Silicon (unified memory means main+draft both want GPU). Even
+            # a 1B draft on CPU caps total throughput far below CPU-less
+            # main-only inference — negating the entire speedup.
+            cmd += ["--gpu-layers-draft", str(params.get("n_gpu_layers_draft", 99))]
             if params.get("spec_draft_n_max"):
                 cmd += ["--spec-draft-n-max", str(params["spec_draft_n_max"])]
             if params.get("spec_draft_n_min"):

@@ -1,9 +1,32 @@
-# pylonrack-calibrate
+## ParallaxVox workflow
 
-PylonRack slot for **automated calibration** of `llama-server` parameters. Given a list of local GGUF models, runs a parameter sweep to find the best `llama-server` configuration for each model, in two distinct profiles:
+This slot is built for one explicit purpose: calibrating the local
+`llama-server` setup used by [ParallaxVox](https://parallaxvox.com), a
+geopolitical news monitoring and analysis pipeline.
 
-- **Single-use** (chat): optimizes decode tok/s and TTFT (time-to-first-token)
-- **Throughput** (parallel pipeline): optimizes aggregate tok/s across N parallel slots
+The pipeline has four model-heavy stages, each with its own workload shape:
+
+| Stage | Workload | Profile to calibrate | Models tested |
+|---|---|---|---|
+| RSS → Ideas | Many short prompts in batch | throughput | Llama 3.1 8B (+ draft) |
+| Ideas → Consolidation | A few parallel groups | throughput (par=2-4) | Gemma 4 26B-A4B |
+| Consolidation → Articles | Long generation, may be parallel | throughput | Qwen 3.6 35B-A3B |
+| Ad-hoc analysis | Single chat-style query | single | Any of the above |
+
+For each stage:
+
+1. Run a Standard suite with the relevant model and matching profile
+2. Read the winner's `Copy command` and apply those flags wherever the
+   stage spawns `llama-server` (or update the pylonrack-llama settings_map
+   if you run it interactively)
+3. Validate by running a real pipeline pass and comparing observed tok/s
+   against the calibrated number
+
+Results are not auto-applied — the human is the bridge between calibration
+and production. This is intentional: different stages use different settings
+and there's no role-aware mapping in the slot's data model.
+
+---
 
 Persists results as a history of *suites* and surfaces a **winner** per (model, profile) — with a copy-pastable `llama-server` command.
 
@@ -22,6 +45,39 @@ Persists results as a history of *suites* and surfaces a **winner** per (model, 
    - Stops the server
    - Aggregates samples via median
 5. After all runs, winners are picked: max decode tok/s for single, max aggregate tok/s for throughput
+
+See **ParallaxVox workflow** below for the specific use case this slot was
+built to support.
+
+---
+
+## ParallaxVox workflow
+
+This slot is built for one explicit purpose: calibrating the local
+`llama-server` setup used by [ParallaxVox](https://parallaxvox.com), a
+geopolitical news monitoring and analysis pipeline.
+
+The pipeline has four model-heavy stages, each with its own workload shape:
+
+| Stage | Workload | Profile to calibrate | Models tested |
+|---|---|---|---|
+| RSS → Ideas | Many short prompts in batch | throughput | Llama 3.1 8B (+ draft) |
+| Ideas → Consolidation | A few parallel groups | throughput (par=2-4) | Gemma 4 26B-A4B |
+| Consolidation → Articles | Long generation, may be parallel | throughput | Qwen 3.6 35B-A3B |
+| Ad-hoc analysis | Single chat-style query | single | Any of the above |
+
+For each stage:
+
+1. Run a Standard suite with the relevant model and matching profile
+2. Read the winner's `Copy command` and apply those flags wherever the
+   stage spawns `llama-server` (or update the pylonrack-llama settings_map
+   if you run it interactively)
+3. Validate by running a real pipeline pass and comparing observed tok/s
+   against the calibrated number
+
+Results are not auto-applied — the human is the bridge between calibration
+and production. This is intentional: different stages use different settings
+and there's no role-aware mapping in the slot's data model.
 
 ---
 
@@ -99,9 +155,10 @@ Three tabs:
 
 ### Setup
 - Models list with per-model size, fit status (ok / tight / no fit) relative to current available memory
+- **Per-model draft picker** — when a model is selected AND the Single profile is active, a dropdown appears under each model listing smaller models in the cache (≤50% of main size) that can serve as a draft for speculative decoding. Only applied to single-profile runs; throughput runs always skip the draft.
 - Profile cards (toggleable): Single-use / Throughput
 - Budget radios: Quick (~2 combos/profile) / Standard (~4-5) / Thorough (~7-8)
-- Mode toggle: Auto sweep (default) or Manual matrix (advanced — coming)
+- Mode toggle: Auto sweep (default) — Manual matrix flag is pending removal
 - Start Suite button + ETA preview
 
 ### Live Run
@@ -137,12 +194,17 @@ Content is intentionally generic — calibration measures the engine, not the re
 | Standard | ub=512, ub=1024, ub=2048, plus one larger ctx |
 | Thorough | grid over ub × ctx × flash_attn |
 
+Draft model, when picked, is applied to every single-profile combination.
+
 ### Throughput
 | Budget | Combinations |
 |---|---|
 | Quick | parallel=4, parallel=8 |
 | Standard | parallel=2/4/8/16 + best parallel × bigger batch |
 | Thorough | full grid over parallel × batch/ubatch |
+
+Throughput runs never use a draft model (parallel slots already saturate the
+GPU; drafts would regress aggregate throughput).
 
 ---
 

@@ -34,6 +34,7 @@ from resources import (
 )
 from results_store import ResultsStore
 from suite_runner import SuiteRunner
+from parent_watchdog import watch_parent
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,20 +87,31 @@ def _manifest(ui_port: int) -> dict:
         "version": "2.0",
         "heartbeat_interval": 5,
         "controls": [
-            {"id": "suite_toggle",   "type": "button", "label": "Start Suite", "style": "primary"},
-            {"id": "progress_label", "type": "label",  "value": "Idle", "style": "default"},
-            {"id": "eta_label",      "type": "label",  "value": "", "style": "default"},
-            {"id": "metric_label",   "type": "label",  "value": "", "style": "default"},
+            {"id": "suite_toggle",   "type": "button", "label": "Start Suite", "style": "primary",
+             "tooltip": "Start a calibration suite for the selected models"},
+            {"id": "progress_label", "type": "label",  "value": "Idle", "style": "default",
+             "tooltip": "Currently running combination"},
+            {"id": "eta_label",      "type": "label",  "value": "", "style": "default",
+             "tooltip": "Estimated time remaining"},
+            {"id": "metric_label",   "type": "label",  "value": "", "style": "default",
+             "tooltip": "Last measurement"},
         ],
         "ui_url": f"http://localhost:{ui_port}/index.html",
+        # No model manager (no GGUF downloads), no settings panel
+        # (settings.json is rarely edited). Log is useful for debugging.
+        "modes": ["log"],
     }
 
 
 def _pong(state: AppState) -> dict:
+    """Heartbeat reply. Status reflects connection health, not workload:
+    while the slot is responding to pings, we are healthy regardless of
+    whether a suite is currently running. The progress text goes into the
+    message so the rack still surfaces what's happening."""
     running = state.suite_runner.is_running if state.suite_runner else False
     return {
         "type":    "pong",
-        "status":  "warning" if running else "running",
+        "status":  "running",
         "message": state.progress_text if running else "Ready",
     }
 
@@ -292,12 +304,14 @@ class SlotHandler:
         #   profiles: ["single", "throughput"],
         #   budget: "standard",
         #   mode: "auto" | "manual",
+        #   draft_map: {<model_path>: <draft_path> or null, ...},
         #   manual_matrix: {...}  (optional) }
-        selected = payload.get("selected_models", [])
-        profiles = payload.get("profiles", ["single", "throughput"])
-        budget   = payload.get("budget", "standard")
-        mode     = payload.get("mode", "auto")
-        manual   = payload.get("manual_matrix")
+        selected  = payload.get("selected_models", [])
+        profiles  = payload.get("profiles", ["single", "throughput"])
+        budget    = payload.get("budget", "standard")
+        mode      = payload.get("mode", "auto")
+        manual    = payload.get("manual_matrix")
+        draft_map = payload.get("draft_map") or {}
 
         if not selected:
             await self._send_action_result(ws, "start_suite", False, "No models selected.")
@@ -315,6 +329,7 @@ class SlotHandler:
             budget          = budget,
             mode            = mode,
             manual_matrix   = manual,
+            draft_map       = draft_map,
         )
 
         await self._send(ws, {
@@ -499,6 +514,10 @@ async def main() -> None:
     site = web.TCPSite(runner, "localhost", ui_port)
     await site.start()
     log.info("HTTP UI server on http://localhost:%d", ui_port)
+
+    # Self-terminate if rack process dies — prevents orphan processes that
+    # would hold the port open and block the next rack launch.
+    asyncio.create_task(watch_parent())
 
     log.info("PylonRack model-calibrate slot starting on ws://localhost:%d", ws_port)
     async with websockets.serve(handler.handle, "localhost", ws_port):

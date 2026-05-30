@@ -14,6 +14,7 @@ const state = {
   selectedProfiles: new Set(['single', 'throughput']),
   budget:           'standard',
   mode:             'auto',
+  draftMap:         {},   // { modelPath: draftPath | null }
 
   available_gb:     null,
   total_gb:         null,
@@ -146,10 +147,16 @@ function renderModelsList() {
     return;
   }
   const sorted = [...state.models].sort((a, b) => a.size_gb - b.size_gb);
+  const singleProfileActive = state.selectedProfiles.has('single');
 
   container.innerHTML = sorted.map(m => {
     const selected = state.selectedPaths.has(m.full_path);
     const fit = computeFit(m);
+    // Draft dropdown only shown when (a) this model is selected, (b)
+    // 'single' profile is active, and (c) at least one smaller candidate
+    // exists in the cache. Throughput runs ignore the draft setting.
+    const showDraftPicker = selected && singleProfileActive;
+    const draftPickerHtml = showDraftPicker ? renderDraftPicker(m) : '';
     return `
       <div class="model-item ${selected ? 'selected' : ''} ${fit.cls}"
            data-path="${escapeAttr(m.full_path)}">
@@ -158,6 +165,7 @@ function renderModelsList() {
         <div class="model-size">${m.size_gb.toFixed(1)} GB</div>
         <div class="model-status ${fit.cls}">${fit.label}</div>
       </div>
+      ${draftPickerHtml}
     `;
   }).join('');
 
@@ -165,8 +173,12 @@ function renderModelsList() {
     el.addEventListener('click', () => {
       if (el.classList.contains('blocked')) return;
       const path = el.getAttribute('data-path');
-      if (state.selectedPaths.has(path)) state.selectedPaths.delete(path);
-      else state.selectedPaths.add(path);
+      if (state.selectedPaths.has(path)) {
+        state.selectedPaths.delete(path);
+        delete state.draftMap[path];   // clear draft when deselecting
+      } else {
+        state.selectedPaths.add(path);
+      }
       renderModelsList();
       renderSelectionSummary();
       requestAction('get_resources', resourcesPayload());
@@ -174,7 +186,48 @@ function renderModelsList() {
     });
   });
 
+  // Wire up draft dropdowns. Listen on change, do not propagate to the
+  // parent .model-item click handler (which would toggle selection).
+  container.querySelectorAll('.draft-picker select').forEach(sel => {
+    sel.addEventListener('click', (e) => e.stopPropagation());
+    sel.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const path = sel.getAttribute('data-for');
+      const val  = sel.value;
+      if (val) state.draftMap[path] = val;
+      else     delete state.draftMap[path];
+    });
+  });
+
   renderSelectionSummary();
+}
+
+function draftCandidatesFor(model) {
+  // A model is a viable draft if it's strictly smaller (heuristic: under
+  // 50% of main size). Tokenizer compatibility is the real constraint at
+  // runtime — we surface all small candidates and let llama-server reject
+  // mismatches (loud failure is better than silent exclusion).
+  const threshold = model.size_gb * 0.5;
+  return state.models.filter(m =>
+    m.full_path !== model.full_path && m.size_gb < threshold
+  ).sort((a, b) => a.size_gb - b.size_gb);
+}
+
+function renderDraftPicker(model) {
+  const candidates = draftCandidatesFor(model);
+  if (candidates.length === 0) return '';
+  const current = state.draftMap[model.full_path] || '';
+  const options = ['<option value="">None (no speculative decoding)</option>']
+    .concat(candidates.map(c =>
+      `<option value="${escapeAttr(c.full_path)}" ${c.full_path === current ? 'selected' : ''}>` +
+      `${escapeHtml(c.display_name)} — ${c.size_gb.toFixed(1)} GB</option>`
+    ));
+  return `
+    <div class="draft-picker" data-for="${escapeAttr(model.full_path)}">
+      <span class="draft-label">Draft (single only):</span>
+      <select data-for="${escapeAttr(model.full_path)}">${options.join('')}</select>
+    </div>
+  `;
 }
 
 function computeFit(model) {
@@ -242,6 +295,9 @@ function initProfileCards() {
         if (state.selectedProfiles.size > 1) state.selectedProfiles.delete(p);
       } else state.selectedProfiles.add(p);
       card.classList.toggle('selected', state.selectedProfiles.has(p));
+      // Re-render models list so the draft picker appears/disappears
+      // depending on whether 'single' profile is now active.
+      renderModelsList();
       renderEtaPreview();
     });
   });
@@ -275,33 +331,76 @@ function renderEtaPreview() {
 
 function initStartButton() {
   document.getElementById('btn-start-suite').addEventListener('click', () => {
-    if (state.selectedPaths.size === 0) { alert('Select at least one model.'); return; }
-    if (state.selectedProfiles.size === 0) { alert('Select at least one profile.'); return; }
+    if (state.selectedPaths.size === 0) { showToast('Select at least one model.'); return; }
+    if (state.selectedProfiles.size === 0) { showToast('Select at least one profile.'); return; }
     const selected_models = [...state.selectedPaths].map(p => {
       const m = state.models.find(mm => mm.full_path === p);
       return { full_path: p, size_gb: m ? m.size_gb : 5.0 };
     });
+    // Only include draft entries for models that are currently selected
+    // (defensive — stale entries should already be cleared on deselect).
+    const draft_map = {};
+    for (const p of state.selectedPaths) {
+      if (state.draftMap[p]) draft_map[p] = state.draftMap[p];
+    }
     requestAction('start_suite', {
       selected_models,
-      profiles: [...state.selectedProfiles],
-      budget:   state.budget,
-      mode:     state.mode,
+      profiles:  [...state.selectedProfiles],
+      budget:    state.budget,
+      mode:      state.mode,
+      draft_map,
     });
   });
 }
 
 function initStopButton() {
-  document.getElementById('btn-stop-suite').addEventListener('click', () => {
-    if (confirm('Stop the running suite?')) requestAction('stop_suite');
+  const btn = document.getElementById('btn-stop-suite');
+  btn.addEventListener('click', () => {
+    // Two-step arm pattern — same reason as history-delete: WKWebView
+    // does not surface confirm() dialogs without a UIDelegate.
+    if (btn.classList.contains('armed')) {
+      clearTimeout(btn._armTimer);
+      btn.classList.remove('armed');
+      btn.textContent = btn._originalLabel || 'Stop suite';
+      requestAction('stop_suite');
+      return;
+    }
+    btn._originalLabel = btn.textContent;
+    btn.textContent = 'Click again to confirm';
+    btn.classList.add('armed');
+    btn._armTimer = setTimeout(() => {
+      btn.classList.remove('armed');
+      btn.textContent = btn._originalLabel || 'Stop suite';
+    }, 4000);
   });
+}
+
+// ToToast — small ephemeral message at the top of the screen. WKWebView
+// suppresses alert() without a UIDelegate, so we draw our own. Self-removes
+// after 3 seconds.
+function showToast(message, kind = 'info') {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    host.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:6px;pointer-events:none;';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.textContent = message;
+  const bg = kind === 'error' ? '#5b1f1f' : '#1f3a2a';
+  const fg = kind === 'error' ? '#ff9999' : '#9bdcb1';
+  el.style.cssText = `background:${bg};color:${fg};padding:8px 14px;border-radius:6px;font-size:0.85rem;border:1px solid ${fg}33;box-shadow:0 4px 12px rgba(0,0,0,0.35);`;
+  host.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
 }
 
 function onStartSuiteResult(data) {
   if (!data.ok) {
     if (data.error === 'resources_insufficient' && data.feasibility) {
-      alert('Cannot start: ' + (data.feasibility.blockers || []).join('\n'));
+      showToast('Cannot start: ' + (data.feasibility.blockers || []).join(' '), 'error');
     } else {
-      alert('Failed to start suite: ' + (data.error || 'unknown'));
+      showToast('Failed to start suite: ' + (data.error || 'unknown'), 'error');
     }
     return;
   }
@@ -566,9 +665,23 @@ function renderHistoryList() {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = el.getAttribute('data-id');
-      if (confirm(`Delete suite ${id}?`)) {
+      // Two-step inline confirmation — do not use confirm() since WKWebView
+      // suppresses native dialogs without a UIDelegate. First click arms
+      // the button (shows checkmark, red bg); second click within 4s
+      // performs the delete; clicking anywhere else cancels.
+      if (el.classList.contains('armed')) {
+        clearTimeout(el._armTimer);
+        el.classList.remove('armed');
         requestAction('delete_suite', { suite_id: id });
+        return;
       }
+      el.classList.add('armed');
+      const original = el.textContent;
+      el.textContent = '✓';
+      el._armTimer = setTimeout(() => {
+        el.classList.remove('armed');
+        el.textContent = original;
+      }, 4000);
     });
   });
 }

@@ -156,6 +156,10 @@ def _label_for(params: dict, profile: str) -> str:
             f"b={params['batch_size']}",
             f"ub={params['ubatch_size']}",
         ]
+    # Draft model applies to single profile only; show as "draft=on" when
+    # present so the user can distinguish runs at a glance in the table.
+    if params.get("draft_model"):
+        bits.append("draft=on")
     return ", ".join(bits)
 
 
@@ -167,13 +171,17 @@ def build_auto_sweep(
     model_path: str,
     profiles: list[str],
     budget: str = "standard",
+    draft_model: Optional[str] = None,
 ) -> list[RunSpec]:
     """Build a list of RunSpecs for one model, auto mode.
 
     Args:
-      model_path: GGUF path
-      profiles:   subset of ["single", "throughput"]
-      budget:     "quick" | "standard" | "thorough"
+      model_path:  GGUF path
+      profiles:    subset of ["single", "throughput"]
+      budget:      "quick" | "standard" | "thorough"
+      draft_model: Optional path to a small GGUF used for speculative decoding.
+                   Applied ONLY to single-profile runs — throughput with
+                   parallel slots gains nothing from drafts and may regress.
 
     Returns:
       list of RunSpec, one per parameter combination.
@@ -191,12 +199,15 @@ def build_auto_sweep(
         else:
             continue
         for params in combos:
+            p = dict(params)
+            if profile == "single" and draft_model:
+                p["draft_model"] = draft_model
             specs.append(RunSpec(
                 model_path  = model_path,
                 profile     = profile,
-                params      = params,
+                params      = p,
                 prompt_name = prompt,
-                label       = _label_for(params, profile),
+                label       = _label_for(p, profile),
             ))
     return specs
 

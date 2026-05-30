@@ -74,8 +74,14 @@ class SuiteRunner:
                     profiles:        list[str],
                     budget:          str = "standard",
                     mode:            str = "auto",
-                    manual_matrix:   Optional[dict] = None) -> dict:
+                    manual_matrix:   Optional[dict] = None,
+                    draft_map:       Optional[dict] = None) -> dict:
         """Start a suite. Returns {ok, suite_id, ...} immediately.
+
+        draft_map (auto mode): {<model_path>: <draft_path or None>, ...}
+          Maps each selected model to an optional speculative-decoding draft
+          GGUF. Applied only to single-profile runs. Models absent from the
+          map (or mapped to None) run without a draft.
 
         manual_matrix (when mode="manual"):
           {
@@ -89,6 +95,8 @@ class SuiteRunner:
         """
         if self.is_running:
             return {"ok": False, "error": "already running", "suite_id": self.current_id}
+
+        draft_map = draft_map or {}
 
         # Feasibility check
         feasibility = check_suite_feasibility(
@@ -114,7 +122,10 @@ class SuiteRunner:
                 ))
         else:
             for path, _size in selected_models:
-                all_specs.extend(build_auto_sweep(path, profiles, budget))
+                all_specs.extend(build_auto_sweep(
+                    path, profiles, budget,
+                    draft_model = draft_map.get(path),
+                ))
 
         if not all_specs:
             return {"ok": False, "error": "no runs to execute"}
@@ -175,6 +186,10 @@ class SuiteRunner:
 
             for idx, spec in enumerate(specs):
                 if self._abort and self._abort.is_set():
+                    # Mark not-running BEFORE notifying so the header update
+                    # built inside the notify callback (which reads
+                    # self.is_running) reflects the post-abort state.
+                    self.is_running = False
                     await self._notify({
                         "type": "suite_aborted",
                         "data": {"suite_id": suite_id, "completed_runs": idx},
@@ -210,6 +225,12 @@ class SuiteRunner:
             winners = self._compute_winners(suite.get("runs", []))
             self._store.finish_suite(suite_id, winners=winners, status="complete")
 
+            # Mark not-running BEFORE notifying so consumers of is_running
+            # (e.g. header builders) see the post-suite state. Without this,
+            # the rack header stays stuck on "Stop Suite / Complete" until
+            # the next message arrives.
+            self.is_running = False
+
             await self._notify({
                 "type": "suite_complete",
                 "data": {
@@ -223,11 +244,15 @@ class SuiteRunner:
         except Exception as exc:
             log.exception("Suite failed")
             self._store.finish_suite(suite_id, winners={}, status="error")
+            self.is_running = False
             await self._notify({
                 "type": "suite_aborted",
                 "data": {"suite_id": suite_id, "error": str(exc)},
             })
         finally:
+            # Belt-and-suspenders: ensure flags are reset even if the
+            # try-block returned early. is_running is set above on the
+            # success and abort paths; this catches anything else.
             self.is_running = False
             self.current_id = None
             self._abort     = None

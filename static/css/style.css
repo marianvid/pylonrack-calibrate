@@ -176,6 +176,41 @@ h2 {
 .model-status.warn  { color: var(--color-warning); }
 .model-status.block { color: var(--color-error); }
 
+/* Draft model picker — rendered as a sibling row right after a selected
+   .model-item. Indented to visually group with its parent model. */
+.draft-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px 8px 46px;     /* 46px = 22px checkbox + 12px gap + 12px hang */
+  margin-bottom: 2px;
+  font-size: 0.72rem;
+  color: var(--color-label);
+  background: rgba(74, 158, 122, 0.04);
+  border-left: 2px solid var(--color-btn-active);
+  margin-left: 12px;
+  border-radius: 0 4px 4px 0;
+}
+.draft-label {
+  color: var(--color-btn-disabled);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.65rem;
+}
+.draft-picker select {
+  flex: 1;
+  background: var(--color-bg);
+  color: var(--color-value);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.draft-picker select:hover { border-color: var(--color-border-hi); }
+.draft-picker select:focus { outline: none; border-color: var(--color-btn-active); }
+
 .selection-summary {
   margin-top: 12px;
   padding: 8px 12px;
@@ -453,10 +488,29 @@ h2 {
 .history-status-pill { font-size: 0.65rem; padding: 1px 8px; border-radius: 8px; }
 .history-delete {
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: var(--color-btn-disabled);
   cursor: pointer;
   font-size: 0.85rem;
-  padding: 2px 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: all 100ms;
 }
 .history-delete:hover { color: var(--color-error); }
+.history-delete.armed {
+  background: rgba(224, 112, 112, 0.18);
+  border-color: var(--color-error);
+  color: var(--color-error);
+  font-weight: 700;
+}
+
+.btn.stop.armed {
+  background: var(--color-error);
+  color: white;
+  border-color: var(--color-error);
+  animation: pulse-stop 0.8s ease-in-out infinite alternate;
+}
+@keyframes pulse-stop {
+  from { opacity: 1; }
+  to   { opacity: 0.7; }
+}
