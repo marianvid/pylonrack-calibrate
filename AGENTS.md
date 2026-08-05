@@ -17,7 +17,7 @@ local_path: /Volumes/Marian_Backup/work/pylonrack-slots/calibrate/
 rack_protocol: PylonRack WebSocket protocol (see pylonrack/AGENTS.md)
 ws_port: 8767 (from rack.json, overridable via PYLON_PORT env var)
 ui_port: ws_port + 100 (HTTP static server for the WebView UI)
-venv: .venv/ (auto-created by start.sh on first run)
+python: PYLONRACK_PYTHON override, shared local conda env, or .venv fallback
 deps: websockets>=12.0, aiohttp>=3.9, psutil>=5.9, requests>=2.31
 ```
 
@@ -57,7 +57,7 @@ parent_watchdog.py — IDENTICAL copy in every slot (self-terminate on rack deat
 static/            — WebView UI (HTML + CSS + JS, served via aiohttp)
 settings.json      — user config (gitignored)
 rack.json          — PylonRack slot manifest
-start.sh           — venv bootstrap + exec python3 server.py
+start.sh           — shared-Python override or venv bootstrap + exec server.py
 tests/             — pytest test suite
 ```
 
@@ -482,13 +482,14 @@ combinations, so the manual mode is unused. The UI currently shows it as
 
 ```sh
 # E2E backend smoke (no WebSocket)
-.venv/bin/python -m pytest tests/test_e2e.py -v
+PYLONRACK_PYTHON=/path/to/python ./start.sh  # start backend first when needed
+/path/to/python tests/test_e2e.py
 
 # Full WebSocket flow (starts server on a random port, drives via WS client)
-.venv/bin/python -m pytest tests/test_e2e_ws.py -v
+/path/to/python tests/test_e2e_ws.py
 
 # Manual: run server standalone
-PYLON_PORT=8767 .venv/bin/python server.py
+PYLON_PORT=8767 /path/to/python server.py
 
 # Manual: inspect results store
 python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.pylonrack/calibrate_results.json'))); print(len(d['suites']),'suites')"

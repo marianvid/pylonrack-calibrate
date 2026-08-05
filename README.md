@@ -7,6 +7,17 @@ PylonRack slot for **automated calibration** of `llama-server` parameters. Given
 
 Persists results as a history of *suites* and surfaces a **winner** per (model, profile) — with a copy-pastable `llama-server` command.
 
+It is a personal tool for using local Apple Silicon resources more efficiently:
+select models already present in the Hugging Face cache, measure them on the
+actual machine, and find a practical sweet spot for either interactive use or
+multiple simultaneous requests.
+
+![Calibrate setup inside PylonRack](docs/images/calibrate-setup.png)
+
+| Suite history | Expanded result |
+|---|---|
+| ![Calibration history](docs/images/calibrate-history.png) | ![Throughput winner and command](docs/images/calibrate-results.png) |
+
 ---
 
 ## How it works
@@ -87,7 +98,9 @@ git clone https://github.com/marianvid/pylonrack-calibrate
 cd pylonrack-calibrate
 ```
 
-Dependencies install automatically on first launch via `start.sh`.
+Dependencies install automatically on first launch via `start.sh`. Set
+`PYLONRACK_PYTHON` to an existing Python 3.11+ interpreter if you want the slot
+to use a shared environment; otherwise it creates a local `.venv`.
 
 ### Configure `settings.json`
 
@@ -214,7 +227,7 @@ If any selected model can't fit, the suite refuses to start.
 pylonrack-calibrate/
 ├── rack.json              ← PylonRack slot manifest
 ├── settings.json          ← local configuration (gitignored)
-├── start.sh               ← venv bootstrap + launch
+├── start.sh               ← shared-Python override or venv bootstrap + launch
 ├── server.py              ← WebSocket + HTTP server, AppState, dispatch
 ├── config.py              ← AppConfig
 ├── prompts.py             ← three fixed prompts (short/medium/long)
@@ -276,6 +289,10 @@ pylonrack-calibrate/
   ]
 }
 ```
+
+> Personal project built through human–AI collaboration. Calibration results
+> are measurements, not guarantees; validate them for your workload. Use at
+> your own risk.
 
 ---
 
