@@ -1,5 +1,10 @@
 # pylonrack-calibrate
 
+> [!NOTE]
+> **Archived:** this project is no longer actively maintained and remains public
+> for reference. Active local-inference development continues in
+> [ai-lab](https://github.com/marianvid/ai-lab).
+
 PylonRack slot for **automated calibration** of `llama-server` parameters. Given a list of local GGUF models, runs a parameter sweep to find the best `llama-server` configuration for each model, in two distinct profiles:
 
 - **Single-use** (chat): optimizes decode tok/s and TTFT (time-to-first-token)
